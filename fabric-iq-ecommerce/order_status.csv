@@ -1,0 +1,6 @@
+OrderStatusID,StatusName,IsTerminal
+STAT1,Processing,false
+STAT2,Shipped,false
+STAT3,Delivered,true
+STAT4,Returned,true
+STAT5,Cancelled,true

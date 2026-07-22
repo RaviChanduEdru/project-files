@@ -1,0 +1,9 @@
+SellerID,Name,ResponseTimeHours,ReturnRatePct,CategoryID,CityID
+S1,TechWorld Store,3,0.96,CAT1,CTY1
+S2,MegaMart,22,4.42,CAT2,CTY6
+S3,HomeGoods Plus,12,2.80,CAT3,CTY4
+S4,Sunrise Traders,52,10.46,CAT4,CTY2
+S5,Blue Ocean Retail,3,0.62,CAT5,CTY5
+S6,City Electronics,4,1.48,CAT6,CTY3
+S7,Green Leaf Store,43,10.47,CAT7,CTY7
+S8,Fast Track Supply,21,3.15,CAT8,CTY12
