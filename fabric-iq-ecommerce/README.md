@@ -4,6 +4,8 @@ The dataset for **[Build an e-commerce ontology in Microsoft Fabric IQ](https://
 
 City Cart is a fictional online marketplace: sellers list products, and customers across India buy them. Eight CSV files hold the whole business. On their own, none of them answers a real question — which is exactly the problem the ontology in the article solves.
 
+**[Download all eight as a ZIP](https://github.com/RaviChanduEdru/project-files/raw/main/fabric-iq-ecommerce/fabric-iq-ecommerce.zip)**, or grab individual files below.
+
 ## Files
 
 | File | Rows | Columns | Links to |

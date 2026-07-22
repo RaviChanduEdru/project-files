@@ -13,10 +13,8 @@ Each project lives in its own folder with a README that explains what's inside.
 ## How to use these files
 
 1. Open a project folder above.
-2. Download the files. Either grab individual files (open one → **Download raw file**), or take the whole repo with the green **Code → Download ZIP**.
+2. Download the files. Each folder ships a **`.zip` of all its files** for one-click download (linked in that folder's README), or grab individual files (open one → **Download raw file**).
 3. Follow the linked article.
-
-> **Tip:** to download just one project folder as a zip, paste its URL into [download-directory.github.io](https://download-directory.github.io/).
 
 ## Adding a project
 
