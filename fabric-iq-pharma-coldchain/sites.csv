@@ -1,0 +1,13 @@
+SiteID,Name,City,State,SiteType
+SITE-HYD-PL,Aurora Hyderabad Plant,Hyderabad,Telangana,Plant
+SITE-HYD-DP,Hyderabad Central Depot,Hyderabad,Telangana,Depot
+SITE-VJA-DP,Vijayawada Depot,Vijayawada,Andhra Pradesh,Depot
+SITE-VTZ-DP,Visakhapatnam Depot,Visakhapatnam,Andhra Pradesh,Depot
+SITE-BLR-DP,Bengaluru Depot,Bengaluru,Karnataka,Depot
+SITE-MAA-DP,Chennai Depot,Chennai,Tamil Nadu,Depot
+SITE-GNT-CL,Guntur District Hospital,Guntur,Andhra Pradesh,Clinic
+SITE-RJY-CL,Rajahmundry Clinic,Rajahmundry,Andhra Pradesh,Clinic
+SITE-TIR-CL,Tirupati Medical Centre,Tirupati,Andhra Pradesh,Clinic
+SITE-MYS-CL,Mysuru Health Centre,Mysuru,Karnataka,Clinic
+SITE-CBE-CL,Coimbatore Clinic,Coimbatore,Tamil Nadu,Clinic
+SITE-WGL-CL,Warangal Clinic,Warangal,Telangana,Clinic

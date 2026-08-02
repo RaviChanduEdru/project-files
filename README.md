@@ -9,6 +9,7 @@ Each project lives in its own folder with a README that explains what's inside.
 | Project | What's inside | Article |
 |---------|---------------|---------|
 | [`fabric-iq-ecommerce`](./fabric-iq-ecommerce) | 8 CSVs — the City Cart e-commerce dataset | [Build an e-commerce ontology in Microsoft Fabric IQ](https://ravichanduedru.me/articles/fabric-iq/build-ecommerce-ontology-fabric-iq) |
+| [`fabric-iq-pharma-coldchain`](./fabric-iq-pharma-coldchain) | 8 CSVs — the Aurora Pharma cold-chain dataset, with live truck telemetry | [Build a live pharma cold-chain monitor in Microsoft Fabric Real-Time Intelligence](https://ravichanduedru.me/articles/fabric-iq/build-pharma-coldchain-fabric-rti) |
 
 ## How to use these files
 

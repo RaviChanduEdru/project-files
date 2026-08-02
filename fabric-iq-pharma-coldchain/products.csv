@@ -1,0 +1,9 @@
+ProductID,Name,Form,MinSafeC,MaxSafeC,BudgetMinutes,FreezeAllowed,UnitValueUSD
+PRD-VAX-01,Trivalent Flu Vaccine,Vaccine,2,8,120,No,8.40
+PRD-VAX-02,Measles Rubella Vaccine,Vaccine,2,8,120,No,6.20
+PRD-VAX-03,Hepatitis B Vaccine,Vaccine,2,8,180,No,5.50
+PRD-VAX-04,Rotavirus Vaccine,Vaccine,2,8,120,No,11.00
+PRD-INS-01,Insulin Glargine,Insulin,2,8,120,No,14.75
+PRD-INS-02,Insulin Aspart,Insulin,2,8,120,No,12.50
+PRD-BIO-01,Monoclonal Antibody Concentrate,Biologic,2,8,150,No,92.00
+PRD-FRZ-01,mRNA Vaccine Concentrate,Frozen biologic,-25,-15,120,Yes,21.50
