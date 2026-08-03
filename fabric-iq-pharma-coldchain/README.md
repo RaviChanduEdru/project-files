@@ -19,6 +19,11 @@ Aurora Pharma is a fictional manufacturer in Hyderabad shipping insulin and vacc
 | `leg_cargo.csv` | 138 | LegID, ShipmentID, TruckID, BatchID, ProductID, MinSafeC, MaxSafeC, BudgetMinutes, DepartUtc, ArriveUtc | legs, batches, products |
 | `reefer_telemetry_seed.csv` | 1,812 | TruckID, Timestamp, TempC, HumidityPct, IntervalMinutes | trucks |
 
+## Also in this folder
+
+- **`kql/`** — the five KQL scripts from Part 1's Stage 3, ready to paste into a queryset: schema, enrichment (the update policy transform), materialized view, agent snapshot, and the verification checks.
+- **`verify-pharma-data.mjs`** — the script that computes every expected number in the article from these CSVs. Run it in this folder with `node verify-pharma-data.mjs` (Node 18+). Every check should print `ok`.
+
 ## How the tables connect
 
 - A **shipment** travels as a chain of **legs**. Each leg is one truck, one stretch of road, one time window.

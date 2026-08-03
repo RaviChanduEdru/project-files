@@ -1,0 +1,142 @@
+// =====================================================================
+// Aurora Pharma cold chain — 02. INGESTION-TIME ENRICHMENT
+//
+// This is where a raw truck reading becomes a fact about a drug batch.
+// Run after 01-schema.kql, before any data flows.
+// =====================================================================
+
+// --- 2.1 MANDATORY PRECONDITION -----------------------------------------
+// The transform below uses `join`. Microsoft Fabric documents the restriction
+// plainly (learn.microsoft.com/kusto/management/update-policy?view=microsoft-fabric,
+// ms.date 2026-06-01, updated 2026-06-23):
+//
+//   "By default, the Streaming ingestion policy is enabled for all tables in
+//    the Eventhouse. To use functions with the join operator in an update
+//    policy, the streaming ingestion policy must be disabled."
+//
+// The engine reason (ADX streaming-ingestion limitations, ms.date 2026-02-10):
+//   "The update policy can only reference newly ingested data in the source
+//    table and not any other data or tables in the database"
+//
+// THE COST, and the article must state it: ingestion now follows the
+// IngestionBatching policy, whose defaults are "5 minutes maximum delay time,
+// 500 items, total size of 1 GB". So enrichment is batched, not instant.
+// Use .alter-merge, not .alter. The alter-merge form is the one Microsoft
+// documents for disabling ("The following command disables the streaming
+// ingestion policy"), and it leaves any other policy properties intact.
+.alter-merge table reefer_telemetry policy streamingingestion '{"IsEnabled": false}'
+
+// Confirm it took. The streaming-ingestion command pages carry the
+// azure-data-explorer moniker only, even though the Fabric update-policy page
+// instructs you to run this in Fabric, so verify rather than assume.
+.show table reefer_telemetry policy streamingingestion
+
+// Optional: trade capacity for freshness. Documented minimum is 00:00:10.
+// The docs warn that very low values raise cost, reduce performance, and can
+// even INCREASE effective end-to-end latency.
+// .alter-merge table reefer_telemetry policy ingestionbatching '{"MaximumBatchingTimeSpan": "00:01:00"}'
+
+
+// --- 2.2 The transform ---------------------------------------------------
+// Output schema must match excursion_events in column NAMES, TYPES and ORDER.
+// The final project enforces that.
+.create-or-alter function
+with (
+    docstring = 'Update-policy transform. Fans one telemetry reading out to every batch riding that truck on that leg, then scores it against that product\'s own safe band.',
+    folder    = 'ColdChain'
+)
+ColdChain_EnrichExcursions()
+{
+    reefer_telemetry
+    // kind=inner is REQUIRED, not stylistic. KQL's default join flavor is
+    // innerunique, which DEDUPLICATES THE LEFT SIDE by the join key: it would
+    // collapse every reading from a truck down to one row and silently destroy
+    // the data. With kind=inner we get one output row per
+    // (reading x matching leg_cargo row), which is the fan-out we want:
+    // one reading -> every batch on that truck's current leg.
+    | join kind=inner (
+        leg_cargo
+        | project LegID, TruckID, BatchID, MinSafeC, MaxSafeC, BudgetMinutes, DepartUtc, ArriveUtc
+      ) on TruckID
+    // Half-open window [DepartUtc, ArriveUtc) on purpose. KQL's `between` is
+    // inclusive at BOTH ends, so on contiguous legs a reading landing exactly
+    // on a handover timestamp would be counted against two legs.
+    | where Timestamp >= DepartUtc and Timestamp < ArriveUtc
+    | extend IsCold = TempC < MinSafeC
+    | extend IsHot  = TempC > MaxSafeC
+    | extend Direction        = case(IsCold, "cold", IsHot, "hot", "in-range")
+    // The reading carries its own interval, so a 15-minute recorded reading and
+    // a 30-second live reading are both scored correctly by the same code.
+    | extend ExcursionMinutes = iff(IsCold or IsHot, IntervalMinutes, 0.0)
+    // This reading's share of the product's budget. Computed HERE, at ingestion
+    // time, because this is the only place that has both the minutes and the
+    // budget in hand. It is what makes the materialized view in 03 possible:
+    // a view can aggregate one table only, so it cannot reach leg_cargo for
+    // the denominator. Since a percentage of a fixed budget is linear in the
+    // minutes, summing these increments equals dividing the total.
+    | extend BudgetPctIncrement =
+        iff(BudgetMinutes > 0, 100.0 * ExcursionMinutes / todouble(BudgetMinutes), 0.0)
+    // Column order below MUST equal excursion_events' column order. TruckID
+    // resolves to the LEFT (telemetry) column; the join auto-renamed the right
+    // side's copy to TruckID1, which is discarded here.
+    | project BatchID, LegID, TruckID, Timestamp, TempC, ExcursionMinutes, Direction,
+              BudgetMinutes, BudgetPctIncrement
+}
+
+
+// --- 2.3 Dry-run before attaching the policy -----------------------------
+// The docs' own recommended technique: "You can test an update policy's
+// performance impact by invoking the policy on already-existing extents,
+// before creating or altering the policy." Run this AFTER some rows have
+// landed and BEFORE 2.4. A broken transform blocks ingestion entirely.
+//
+// let _extentId = toscalar(
+//     reefer_telemetry
+//     | project ExtentId = extent_id(), IngestionTime = ingestion_time()
+//     | where IngestionTime > ago(10m)
+//     | top 1 by IngestionTime desc
+//     | project ExtentId
+// );
+// let reefer_telemetry =
+//     reefer_telemetry
+//     | where ingestion_time() > ago(10m) and extent_id() == _extentId;
+// ColdChain_EnrichExcursions
+// | getschema
+
+
+// --- 2.4 The update policy ----------------------------------------------
+// .alter REPLACES the whole policy array. Use .alter-merge to add an entry
+// alongside existing ones. Permission: Table Admin.
+//
+// IsTransactional:true — "In production systems, set IsTransactional:true to
+//   ensure that the target table doesn't lose data in transient failures."
+//   The trade: a bug in the transform now fails the RAW ingestion too. For a
+//   regulated cold chain that is the right failure mode, because a batch that
+//   silently loses its excursion rows is worse than an ingestion that stops
+//   loudly.
+// PropagateIngestionProperties:false — it only carries extent tags and
+//   creation time, neither of which this pipeline uses.
+// NO ManagedIdentity — that property exists in the Azure Data Explorer moniker
+//   only. Fabric auto-populates a read-only OwnerPrincipalDetails instead.
+.alter table excursion_events policy update
+@'[{ "IsEnabled": true, "Source": "reefer_telemetry", "Query": "ColdChain_EnrichExcursions()", "IsTransactional": true, "PropagateIngestionProperties": false }]'
+
+.show table excursion_events policy update
+
+
+// --- 2.5 CATCH UP THE HISTORY — do not skip -------------------------------
+// The update policy fires at INGESTION time, for rows that arrive after it is
+// attached. It never reaches back. The seed backfill ran in Part 2, before
+// this policy existed, so the whole recorded story (AUR-2207's 330 frozen
+// minutes included) sits in reefer_telemetry unscored. Without this step,
+// excursion_events holds only post-policy live rows and every check in
+// 05-verify.kql fails silently.
+//
+// Run it ONCE, with the live stream STOPPED and its last queued batch drained
+// (~5 min after interrupting the sender). The function reads the whole raw
+// table when invoked directly, so with nothing arriving mid-command, every
+// pre-policy row is scored exactly once and post-policy rows keep coming from
+// the policy. Run it with the stream still sending and the overlap rows get
+// scored twice.
+.set-or-append excursion_events <|
+    ColdChain_EnrichExcursions()

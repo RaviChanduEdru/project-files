@@ -1,0 +1,163 @@
+// =====================================================================
+// Aurora Pharma cold chain — 04. VERIFICATION
+//
+// Run these after the seed backfill. Expected values come from
+// `npm run pharma:verify`, which computes the same arithmetic in Node over
+// the source CSVs. If the two disagree, the KQL is wrong, not the data.
+// =====================================================================
+
+// --- 4.1 Row counts across the pipeline ---------------------------------
+// Expected after the seed backfill (regenerate the dataset and re-read the
+// verify output if these drift):
+//   reefer_telemetry  1812
+//   leg_cargo          138
+//   excursion_events   one row per (reading x batch on that leg)
+union
+    (reefer_telemetry | summarize Rows = count() | extend TableName = "reefer_telemetry"),
+    (leg_cargo        | summarize Rows = count() | extend TableName = "leg_cargo"),
+    (excursion_events | summarize Rows = count() | extend TableName = "excursion_events"),
+    (BatchExposureMV  | summarize Rows = count() | extend TableName = "BatchExposureMV (view)"),
+    (batch_exposure   | summarize Rows = count() | extend TableName = "batch_exposure")
+| project TableName, Rows
+| order by TableName asc
+
+// The view must agree with a direct aggregation over the source. If these
+// differ, the view is not what you think it is.
+let FromView = toscalar(BatchExposureMV | summarize round(sum(CumulativeMinutes), 2));
+excursion_events
+| summarize FromSource = round(sum(ExcursionMinutes), 2)
+| extend FromMaterializedView = FromView
+| extend Match = (FromSource == FromMaterializedView)
+
+// And the two ways of computing the percentage must agree, which is the whole
+// justification for the BudgetPctIncrement trick.
+BatchExposureMV
+| extend DirectPct = round(100.0 * CumulativeMinutes / todouble(BudgetMinutes), 2)
+| extend ViewPct   = round(BudgetUsedPct, 2)
+| extend Match     = (abs(DirectPct - ViewPct) < 0.05)
+| summarize Batches = count(), AllMatch = min(Match)
+
+
+// --- 4.2 The escalation, reproduced in KQL ------------------------------
+// This is the article's table. It must match the verify script:
+//   heat at or above 80% of budget -> AUR-2211, AUR-2308
+//   any freeze at all              -> AUR-2207
+BatchExposureMV
+| extend Verdict = case(
+        FreezeEventCount > 0,  "FREEZE - reject outright",
+        BudgetUsedPct >= 100,  "budget exhausted",
+        BudgetUsedPct >=  80,  "at risk",
+                               "ok")
+| where Verdict != "ok"
+| order by FreezeEventCount desc, BudgetUsedPct desc
+| project BatchID, CumulativeMinutes, BudgetMinutes, BudgetUsedPct, FreezeEventCount, Verdict
+
+
+// --- 4.3 The freeze blind spot, proven ----------------------------------
+// AUR-2207 is the whole argument: 330 minutes below 2C, and NOT ONE reading
+// above 8C anywhere on its journey. Every "too warm" rule stays silent while
+// the insulin is destroyed. HotReadings must come back 0.
+excursion_events
+| where BatchID == "AUR-2207"
+| summarize
+    Readings      = count(),
+    ColdReadings  = countif(Direction == "cold"),
+    HotReadings   = countif(Direction == "hot"),
+    ColdMinutes   = sumif(ExcursionMinutes, Direction == "cold"),
+    HotMinutes    = sumif(ExcursionMinutes, Direction == "hot"),
+    ColdestReading = min(TempC),
+    HottestReading = max(TempC)
+
+
+// --- 4.4 Per-leg breakdown: WHERE the exposure happened -----------------
+// For AUR-2211 this shows three legs of 30, 30 and 45 minutes. No single leg
+// looks alarming; the total is 105 of 120. That contrast is the article's
+// second reveal, and it is the answer no per-shipment portal can give.
+let TargetBatch = "AUR-2211";
+excursion_events
+| where BatchID == TargetBatch
+| summarize
+    Readings          = count(),
+    ExcursionReadings = countif(ExcursionMinutes > 0),
+    LegMinutes        = sum(ExcursionMinutes),
+    MinTempC          = min(TempC),
+    MaxTempC          = max(TempC),
+    FirstReading      = min(Timestamp)
+  by LegID
+| lookup kind=inner (
+    leg_cargo
+    | where BatchID == TargetBatch
+    | project LegID, TruckID, DepartUtc, ArriveUtc
+  ) on LegID
+| order by FirstReading asc
+| extend RunningMinutes = row_cumsum(LegMinutes)
+| project LegID, TruckID, DepartUtc, ArriveUtc, Readings, ExcursionReadings, MinTempC, MaxTempC, LegMinutes, RunningMinutes
+
+
+// --- 4.5 Proof the fan-out worked ---------------------------------------
+// (a) One truck reading must appear once per batch it was carrying. If this
+//     returns NOTHING, the fan-out did not happen, which is the classic
+//     symptom of leaving the join flavor at the innerunique default.
+excursion_events
+| summarize BatchesTouched = dcount(BatchID), Batches = make_set(BatchID)
+  by TruckID, Timestamp
+| where BatchesTouched > 1
+| top 20 by BatchesTouched desc
+
+// (b) Exact reconciliation: recompute the expected row count independently and
+//     compare it to what the update policy actually wrote. Match must be true.
+let Expected = toscalar(
+    reefer_telemetry
+    | join kind=inner (leg_cargo | project TruckID, LegID, BatchID, DepartUtc, ArriveUtc) on TruckID
+    | where Timestamp >= DepartUtc and Timestamp < ArriveUtc
+    | count
+);
+excursion_events
+| summarize ActualRows = count()
+| extend ExpectedRows = Expected
+| extend Match = (ActualRows == ExpectedRows)
+
+// (c) Readings that matched NO leg window are dropped silently by the inner
+//     join. A nonzero count means a coverage gap in leg_cargo, not a bug in
+//     the policy. Expect a small number: trucks report between journeys too.
+reefer_telemetry
+| join kind=leftouter (leg_cargo | project TruckID, LegID, DepartUtc, ArriveUtc) on TruckID
+| extend InWindow = (Timestamp >= DepartUtc and Timestamp < ArriveUtc)
+| summarize Matched = countif(InWindow) > 0 by TruckID, Timestamp
+| summarize UnmatchedReadings = countif(not(Matched)), TotalReadings = count()
+| extend UnmatchedPct = round(100.0 * UnmatchedReadings / TotalReadings, 2)
+
+
+// --- 4.6 The live journey ------------------------------------------------
+// AUR-2299 is the batch the demo watches. Before the incident it sits near 50%
+// with LEG-LIVE-2 open. Run this again during the incident and it climbs.
+batch_exposure
+| where BatchID == "AUR-2299"
+| order by Timestamp desc
+| take 20
+| project Timestamp, CumulativeMinutes, BudgetMinutes, BudgetUsedPct, FreezeEventCount
+
+
+// --- 4.7 Did the update policy fail? ------------------------------------
+// With IsTransactional:true a broken transform stops raw ingestion too, so
+// check here first if reefer_telemetry stops growing.
+// Note: this command retains only 14 days, and covers ingestion management
+// command failures only. It is not a complete failure log.
+.show ingestion failures
+| where FailedOn > ago(1hr) and OriginatesFromUpdatePolicy == true
+
+
+// --- 4.8 Is the materialized view healthy? ------------------------------
+// Run this every time something looks stale. Two fields matter:
+//   IsHealthy      true only if MaterializedTo is within the last hour.
+//   IsEnabled      a PERMANENT materialization error auto-disables the view,
+//                  and it does not restart itself.
+// Reassurance worth knowing: "Materialization never skips any data, even if
+// there are constant failures. The view is always guaranteed to return the
+// most up-to-date snapshot of the query." Failures cost performance, not
+// correctness.
+.show materialized-view BatchExposureMV
+
+// If IsEnabled came back false, find out when and why.
+.show materialized-view BatchExposureMV failures
+.show journal | where Event has "MaterializedView" | top 20 by Timestamp desc

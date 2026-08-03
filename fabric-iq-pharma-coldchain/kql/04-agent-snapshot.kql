@@ -1,0 +1,66 @@
+// =====================================================================
+// Aurora Pharma cold chain — 04. THE OPERATIONS AGENT SNAPSHOT
+//
+// One job, one reason to exist: the operations agent cannot read a
+// materialized view.
+//
+//   "operations agents only support monitoring data in regular Eventhouse
+//    tables. Shortcut tables, functions, and materialized views aren't
+//    supported."
+//    -- operations-agent-limitations, updated 2026-06-15
+//
+// So this appends a periodic snapshot of the view into a regular table. Note
+// what it does NOT do: it does not recompute anything. It reads an aggregate
+// the engine has already maintained and writes it down. That makes it a cheap
+// copy rather than a 288-times-a-day rescan of the whole journey history.
+//
+// The ontology binds the VIEW (always fresh). The operations agent monitors
+// this TABLE (as fresh as the last run). They can differ by up to one
+// schedule interval, and the article should say so rather than pretend the
+// two are the same number.
+//
+// Schedule: a Fabric notebook running this every 5 minutes. The Job Scheduler
+// supports minute-based recurrence "Every 1 to 720 minutes", so 5 is
+// comfortable, and it matches the agent's own fixed 5-minute evaluation.
+// =====================================================================
+
+.set-or-append batch_exposure <|
+    let GraceWindow = 12h;   // keep reporting a batch this long after its last leg lands
+    let AsOf        = now();
+
+    // Only batches still in transit, or just landed. A finished journey does
+    // not need a new snapshot every five minutes forever.
+    let ActiveBatches =
+        leg_cargo
+        | where DepartUtc <= AsOf and ArriveUtc >= ago(GraceWindow)
+        | distinct BatchID;
+
+    BatchExposureMV
+    // leftsemi is a pure filter: all columns from the left, only rows that
+    // match the right. No schema pollution, no row multiplication.
+    | join kind=leftsemi (ActiveBatches) on BatchID
+    | extend Timestamp = AsOf
+    | extend BudgetUsedPct = round(BudgetUsedPct, 2)
+    | extend CumulativeMinutes = round(CumulativeMinutes, 2)
+    | extend FreezeEventCount = toint(FreezeEventCount)
+    // Ingestion into a table matches columns BY POSITION, not by name:
+    // "There's no matching of column names. Make sure that the query result
+    // schema columns are in the same order as the table, otherwise data is
+    // ingested into the wrong columns."
+    | project BatchID, Timestamp, CumulativeMinutes, BudgetMinutes, BudgetUsedPct, FreezeEventCount
+
+// ---------------------------------------------------------------------
+// TWO TRAPS WORTH KNOWING
+//
+// 1. Do not stop emitting a row for a batch you still want monitored. The
+//    agent keys on arrival time, and transition conditions "are met only at
+//    the moment the property changes from not satisfying the condition to
+//    satisfying it". A batch that drops out of the snapshot freezes at its
+//    last value, and a "Crosses above" rule on it can never fire again.
+//    GraceWindow exists for that.
+//
+// 2. A Fabric schedule auto-disables after roughly ten consecutive failures,
+//    which is a silent monitoring outage. Set Failure notifications on the
+//    schedule. Schedules also expire if the owner does not sign in to Fabric
+//    for 90 days.
+// ---------------------------------------------------------------------

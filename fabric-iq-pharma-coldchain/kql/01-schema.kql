@@ -1,0 +1,117 @@
+// =====================================================================
+// Aurora Pharma cold chain — 01. SCHEMA
+// Run once, in a queryset against the AuroraEH KQL database.
+//
+// Syntax verified 2026-07-28 against learn.microsoft.com/kusto/management/
+// create-table-command (ms.date 2024-08-11). Permission: Database User.
+//
+// The article runs all of this as ONE command by wrapping it in
+// `.execute database script <|`. If you do the same, replace the blank lines
+// between commands with `//` comment lines first — the query editor treats a
+// blank line as the end of a command and silently truncates the script there.
+// =====================================================================
+
+// --- Bronze: the raw stream from the Eventstream custom endpoint ---------
+// IntervalMinutes travels WITH the reading instead of being a constant in the
+// enrichment function. The recorded journeys report every 15 minutes; the live
+// sender reports every 30 seconds so a demo moves at human speed. One constant
+// cannot serve both, and a wrong constant silently multiplies every exposure
+// number in the system.
+.create table reefer_telemetry (
+    TruckID:         string,
+    Timestamp:       datetime,
+    TempC:           real,
+    HumidityPct:     int,
+    IntervalMinutes: real
+) with (
+    folder    = "01-Bronze",
+    docstring = "Raw reefer telemetry landed by an Eventstream custom endpoint. One row per truck per reporting interval."
+)
+
+// --- Dimension: which cargo is on which truck, on which leg, when --------
+// Grain: one row per (LegID, BatchID). One leg carries several batches and one
+// batch crosses several legs, which is exactly what produces the fan-out in the
+// enrichment step. This table is the graph, flattened so KQL can join to it.
+.create table leg_cargo (
+    LegID:         string,
+    ShipmentID:    string,
+    TruckID:       string,
+    BatchID:       string,
+    ProductID:     string,
+    MinSafeC:      real,
+    MaxSafeC:      real,
+    BudgetMinutes: int,
+    DepartUtc:     datetime,
+    ArriveUtc:     datetime
+) with (
+    folder    = "00-Dimension",
+    docstring = "Shipment plan. One row per leg per drug batch, carrying that product's safe band and excursion budget."
+)
+
+// --- Silver: per-reading, per-batch enrichment (update policy target) ----
+// BudgetMinutes and BudgetPctIncrement are carried here on purpose. A
+// materialized view can only aggregate over ONE source table, so it cannot
+// reach back to leg_cargo for the budget denominator. The update policy is
+// already joined to leg_cargo and already holds the budget, so it computes
+// each reading's share of it. A percentage of a fixed budget is linear in the
+// minutes, so it distributes over the sum: summing the increments gives the
+// same answer as dividing the total. That one line is what lets the engine
+// maintain the whole aggregate incrementally.
+.create table excursion_events (
+    BatchID:            string,
+    LegID:              string,
+    TruckID:            string,
+    Timestamp:          datetime,
+    TempC:              real,
+    ExcursionMinutes:   real,
+    Direction:          string,
+    BudgetMinutes:      int,
+    BudgetPctIncrement: real
+) with (
+    folder    = "02-Silver",
+    docstring = "One row per telemetry reading per batch riding that truck on that leg. ExcursionMinutes equals the reading interval when the reading is outside the product's safe band, otherwise 0."
+)
+
+// --- Gold: the table the operations agent monitors -----------------------
+// MUST be a regular table. Operations agent docs: "operations agents only
+// support monitoring data in regular Eventhouse tables. Shortcut tables,
+// functions, and materialized views aren't supported."
+.create table batch_exposure (
+    BatchID:           string,
+    Timestamp:         datetime,
+    CumulativeMinutes: real,
+    BudgetMinutes:     int,
+    BudgetUsedPct:     real,
+    FreezeEventCount:  int
+) with (
+    folder    = "03-Gold",
+    docstring = "Snapshot appended every 5 minutes. Cumulative out-of-range exposure per drug batch across every leg of its journey. Bind BudgetUsedPct as an ontology timeseries property."
+)
+
+// --- Column descriptions -------------------------------------------------
+// The operations agent best-practices page asks for these explicitly: "If a
+// column's purpose is unclear from its name, add a plain-language description
+// by using the description field in your KQL table schema. This description
+// helps the agent interpret data values correctly."
+.alter-merge table batch_exposure column-docstrings (
+    BatchID:           "Unique identifier of a drug batch. Use this to identify the business object.",
+    Timestamp:         "UTC time this snapshot was computed by the scheduled aggregation job.",
+    CumulativeMinutes: "Total minutes this batch has spent outside its product's safe temperature band, summed across every leg of its journey so far.",
+    BudgetMinutes:     "The product's total allowed excursion budget in minutes for the whole journey.",
+    BudgetUsedPct:     "CumulativeMinutes as a percentage of BudgetMinutes. 100 means the batch has consumed its entire excursion allowance.",
+    FreezeEventCount:  "Number of readings below the product's minimum safe temperature. Freezing has no allowance at all, so any value above 0 is an instant quality failure regardless of BudgetUsedPct."
+)
+
+.alter-merge table excursion_events column-docstrings (
+    ExcursionMinutes:   "Minutes of exposure attributed to this single reading. Equals the reading interval when out of band, otherwise 0.",
+    Direction:          "cold when below the product minimum, hot when above the product maximum, in-range otherwise.",
+    BudgetMinutes:      "The product's whole-journey excursion budget, copied from the shipment plan at ingestion time.",
+    BudgetPctIncrement: "This reading's share of the product's budget, as a percentage. Summing these gives the batch's total budget used."
+)
+
+// --- Retention -----------------------------------------------------------
+// Keep the raw readings: a pharma audit wants the original trace, and the
+// verification queries in 04-verify.kql reconcile against them.
+.alter-merge table reefer_telemetry policy retention softdelete = 90d
+.alter-merge table excursion_events policy retention softdelete = 90d
+.alter-merge table batch_exposure   policy retention softdelete = 30d

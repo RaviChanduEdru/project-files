@@ -1,0 +1,59 @@
+// =====================================================================
+// Aurora Pharma cold chain — 03. THE MATERIALIZED VIEW
+//
+// This is the always-fresh, engine-maintained running total of every batch's
+// exposure. It is the single source of truth for the aggregate, and it exists
+// because the platform maintains it better than a job can.
+//
+// Microsoft's own description (materialized-view-overview, ms.date 2024-08-11):
+//   "Materialized views always return an up-to-date result of the aggregation
+//    query (always fresh)."
+//   "A materialized view query always returns the most up-to-date results,
+//    independent of when materialization last took place. The query combines
+//    the materialized part of the view with the records in the source table,
+//    which haven't yet been materialized (the delta part)."
+//   "Querying a materialized view consumes less resources than doing the
+//    aggregation over the source table."
+//
+// WHY THE AGGREGATION IS THIS SIMPLE. A materialized view can aggregate over
+// exactly one source table, so it cannot join leg_cargo for the budget
+// denominator. The update policy in 02 solved that at ingestion time by
+// computing each reading's BudgetPctIncrement while it already had the budget
+// in hand. Summing those increments is arithmetically identical to dividing
+// the total by the budget, so the view stays a pure aggregation and the engine
+// can maintain it incrementally.
+//
+// Run once, after 02-enrichment.kql.
+// =====================================================================
+
+// backfill=true builds the view over data already in excursion_events. Leave it
+// out and the view only covers rows ingested from this moment on, which is a
+// quiet way to lose your whole seed.
+.create materialized-view with (backfill=true, docstring="Running cold-chain exposure per drug batch across every leg of its journey. Always fresh. Bound to the Batch entity as a timeseries property.")
+BatchExposureMV on table excursion_events
+{
+    excursion_events
+    | summarize
+        CumulativeMinutes = sum(ExcursionMinutes),
+        // The sum of per-reading shares. Identical to
+        // 100 * CumulativeMinutes / BudgetMinutes, but expressible without a join.
+        BudgetUsedPct     = sum(BudgetPctIncrement),
+        // Counted, never budgeted. A frozen vial is destroyed, so there is no
+        // such thing as "8% of your freeze allowance used". Its own column
+        // means it can have its own rule, which matters because the operations
+        // agent does not support AND conditions.
+        FreezeEventCount  = countif(Direction == "cold" and ExcursionMinutes > 0),
+        BudgetMinutes     = max(BudgetMinutes),
+        LastReading       = max(Timestamp)
+      by BatchID
+}
+
+// Confirm it built and is healthy. Watch IsHealthy and the materialized-to
+// watermark; a view that stops advancing is a silent outage.
+.show materialized-view BatchExposureMV
+.show materialized-view BatchExposureMV failures
+
+// Read it exactly as you would a table.
+BatchExposureMV
+| order by BudgetUsedPct desc
+| take 20
